@@ -1,4 +1,4 @@
 node_modules/
-
+.claude/
 # Safety net — config belongs in ~/.Skippy/, not the repo
 Skippy.json
