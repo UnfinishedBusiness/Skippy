@@ -1,0 +1,4 @@
+node_modules/
+
+# Safety net — config belongs in ~/.Skippy/, not the repo
+Skippy.json

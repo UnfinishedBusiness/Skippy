@@ -1,0 +1,22 @@
+{
+  "name": "skippy-daemon",
+  "version": "1.0.0",
+  "description": "A Node.js daemon with start/stop/restart and foreground logging.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "daemon": "node src/index.js --daemon",
+    "stop": "node src/cli.js stop",
+    "restart": "node src/cli.js restart"
+  },
+  "dependencies": {
+    "discord.js": "latest",
+    "ollama": "latest",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^2.4.5",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
+    "trello": "^0.11.0",
+    "winston": "^3.10.0"
+  }
+}

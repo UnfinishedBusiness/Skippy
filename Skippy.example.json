@@ -1,0 +1,43 @@
+{
+  "log_level": "info",
+  "discord": {
+    "token": "<Your Discord Bot Token Here>",
+    "guildId": "<Your Discord Guild ID Here>",
+    "messageHistoryLimit": 20,
+    "default_user": "travis.gillin"
+  },
+  "ollama": {
+    "apiKey": "<Your Ollama API Key Here>",
+    "model": "deepseek-v3.1:671b",
+    "timeout": 120000,
+    "stream_inactivity_timeout": 30000,
+    "max_retries": 3
+  },
+  "prompt": {
+    "loop_limit": 10
+  },
+  "memory": {
+    "context_categories": [
+      "agent",
+      "preferences",
+      "user_info"
+    ]
+  },
+  "tools": {
+    "trello": {
+      "apiKey": "<Your Trello API Key Here>",
+      "apiToken": "<Your Trello API Token Here>"
+    },
+    "web_search": {
+      "default_engine": "searchapi",
+      "engines": {
+        "brave": {
+          "apiKey": "<Your Brave API Key Here>"
+        },
+        "searchapi": {
+          "apiKey": "<Your SearchAPI.io API Key Here>"
+        }
+      }
+    }
+  }
+}
