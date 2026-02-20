@@ -148,6 +148,10 @@ Skippy is controlled via the `./skippy` CLI wrapper.
 ./skippy start --debug      # Run in the foreground with live colored output
 ./skippy stop               # Stop the running daemon
 ./skippy restart            # Restart the daemon
+./skippy cron --dump        # Display all cron jobs in a table
+./skippy memory --dump      # Display all memory data in colored tables
+./skippy memory --table <table>  # Display specific table (global, skills, channel_<name>)
+./skippy memory --key <key> # Get specific key (use with --table)
 ./skippy log                # Print the daemon log
 ./skippy log --follow       # Follow the log live (like tail -f)
 ```
