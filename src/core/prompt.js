@@ -872,7 +872,13 @@ function clearAbort(channelId) {
 const pendingContinuations = new Map();
 
 function isAffirmativeResponse(text) {
-  const s = text.trim().toLowerCase().replace(/[!.,?]+$/, '');
+  // Discord wraps the user's message in a conversation block like:
+  //   "Recent conversation:\nuser: continue\n...\nCurrent request: continue"
+  // Extract just the current request if present; otherwise use the raw text.
+  const currentRequestMatch = text.match(/Current request:\s*(.+?)(?:\n|$)/i);
+  const raw = currentRequestMatch ? currentRequestMatch[1].trim() : text.trim();
+
+  const s = raw.toLowerCase().replace(/[!.,?]+$/, '');
   const affirmatives = [
     'yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay',
     'continue', 'go ahead', 'proceed', 'go on', 'keep going',
@@ -1313,10 +1319,8 @@ async function runPrompt({ prompt, model, stream = true, discordMessage, imageUr
 
       const continueQuestion = `I've hit my step limit (${loopLimit} steps) and there's still work to do. Would you like me to continue?`;
 
-      if (discordMessage) {
-        await discordMessage.channel.send(continueQuestion);
-      }
-
+      // Do NOT call discordMessage.channel.send() here — the callback handler
+      // already sends final_answer to Discord, so doing both causes a double-send.
       if (callback) {
         callback({
           max_iterations_reached: true,
