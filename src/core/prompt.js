@@ -126,14 +126,39 @@ const CATEGORY_LABELS = {
 // Queries MemoryTool for global memories in the configured context_categories and
 // injects them into the system prompt grouped by category. Categories and their
 // labels are configurable via Skippy.json memory.context_categories.
-async function buildMemoryContext() {
+// When channelName is provided, also fetches channel-specific memories and merges them
+// (channel memories take precedence over global memories for the same key).
+async function buildMemoryContext(channelName) {
   const logger = global.logger || console;
   try {
     const memTool = toolRegistry['MemoryTool'];
     if (!memTool) return '';
 
-    const categories = global.SkippyConfig?.memory?.context_categories ?? ['agent', 'preferences', 'user_info'];
+    const categories = global.SkippyConfig?.memory?.context_categories ?? ['agent', 'preferences', 'user_info', 'project'];
+    
+    // Get global memories
     const grouped = await memTool.getContextMemories(categories);
+    
+    // Also get channel memories if channelName is provided
+    if (channelName) {
+      for (const category of categories) {
+        const channelResult = await memTool.getChannelByCategory(channelName, category);
+        if (channelResult.success && channelResult.results && channelResult.results.length > 0) {
+          // Initialize category array if not present
+          if (!grouped[category]) grouped[category] = [];
+          
+          // Merge channel memories into grouped (channel takes precedence)
+          const existingKeys = new Set(grouped[category].map(e => e.key));
+          for (const m of channelResult.results) {
+            if (!existingKeys.has(m.key)) {
+              grouped[category].push({ key: m.key, value: m.value });
+              existingKeys.add(m.key);
+            }
+          }
+        }
+      }
+    }
+    
     if (!grouped || Object.keys(grouped).length === 0) return '';
 
     let totalCount = 0;
@@ -930,7 +955,7 @@ async function runPrompt({ prompt, model, stream = true, discordMessage, imageUr
 
   const systemPromptLength = SYSTEM_PROMPT.length;
   const toolContextLength = global.CondensedToolContext ? global.CondensedToolContext.length : 0;
-  const memoryContext  = await buildMemoryContext();
+  const memoryContext  = await buildMemoryContext(channelName);
   const skillContext   = await buildSkillContext(currentUser);
   const channelContext = await buildChannelContext();
 
