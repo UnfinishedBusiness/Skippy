@@ -73,6 +73,29 @@ const fileFormat = winston.format.combine(
 // Truncate log file at startup so each run starts fresh
 fs.writeFileSync(LOG_FILE, '');
 
+// Crash handlers - log uncaught exceptions and unhandled rejections to the log file before exiting
+function logCrashToFile(prefix, error) {
+  const timestamp = formatTimestamp();
+  const stack = error?.stack || String(error);
+  const msg = `${timestamp} [${prefix}] (index.js:crash) ${stack}\n`;
+  fs.appendFileSync(LOG_FILE, msg);
+}
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  logCrashToFile('FATAL', err);
+  // Also try to log to stderr if possible
+  console.error('FATAL: Uncaught exception:', err);
+  process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  logCrashToFile('FATAL', reason);
+  console.error('FATAL: Unhandled rejection:', reason);
+  process.exit(1);
+});
+
 const isDebug = process.argv.includes('--debug');
 const baseLogger = winston.createLogger({
   level: isDebug ? 'debug' : (global.SkippyConfig?.log_level ?? 'info'),
