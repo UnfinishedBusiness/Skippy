@@ -310,28 +310,123 @@ function cmdHelp() {
 }
 
 async function cmdMemory(argv) {
-  const { sendIpcRequest } = require('./core/ipc');
-  const { flags, positional } = parseFlags(argv);
+  const { flags } = parseFlags(argv);
 
-  if (flags.dump) {
-    const request = { type: 'memory_dump' };
-
-    try {
-      const result = await sendIpcRequest(request);
-      if (result.content) {
-        process.stdout.write(result.content + '\n');
-      } else {
-        err('No memory data returned');
-      }
-    } catch (e) {
-      err(e.message);
-      process.exit(1);
-    }
-  } else {
+  if (!flags.dump) {
     err('No valid memory operation specified');
     print(`  Available: ${c.bold}--dump${c.reset} - display memory data in colored tables`);
     process.exit(1);
   }
+
+  const { MEMORY_DB } = require('./core/paths');
+  const sqlite3 = require('sqlite3').verbose();
+  const { open } = require('sqlite');
+
+  if (!fs.existsSync(MEMORY_DB)) {
+    warn(`No memory database found at ${MEMORY_DB}`);
+    process.exit(1);
+  }
+
+  let db;
+  try {
+    db = await open({ filename: MEMORY_DB, driver: sqlite3.Database });
+  } catch (e) {
+    err(`Failed to open memory database: ${e.message}`);
+    process.exit(1);
+  }
+
+  function renderTable(headers, rows) {
+    const widths = headers.map((h, i) =>
+      Math.max(h.length, ...rows.map(r => String(r[i] ?? '').length))
+    );
+    const bar = c.gray + '+' + widths.map(w => '-'.repeat(w + 2)).join('+') + '+' + c.reset;
+    print(bar);
+    print(c.bold + '|' + headers.map((h, i) => ` ${h.padEnd(widths[i])} `).join('|') + '|' + c.reset);
+    print(bar);
+    for (const row of rows) {
+      print('|' + row.map((cell, i) => ` ${String(cell ?? '').padEnd(widths[i])} `).join('|') + '|');
+    }
+    print(bar);
+  }
+
+  function truncate(s, n) {
+    s = String(s ?? '');
+    return s.length > n ? s.slice(0, n - 1) + '\u2026' : s;
+  }
+
+  function fmtTs(ts) {
+    return String(ts ?? '').slice(0, 16).replace('T', ' ');
+  }
+
+  function fmtValue(raw) {
+    try {
+      const p = JSON.parse(raw);
+      return truncate(typeof p === 'string' ? p : JSON.stringify(p), 60);
+    } catch {
+      return truncate(raw, 60);
+    }
+  }
+
+  // Global Memories
+  const globalRows = await db.all('SELECT key, category, tags, value, updated_at FROM global_memories ORDER BY category, key');
+  print('');
+  print(`${c.cyan}${c.bold}Global Memories${c.reset}  ${c.gray}(${globalRows.length} rows)${c.reset}`);
+  if (globalRows.length === 0) {
+    print(`  ${c.gray}(empty)${c.reset}`);
+  } else {
+    renderTable(
+      ['Key', 'Category', 'Tags', 'Value', 'Updated'],
+      globalRows.map(r => [r.key, r.category || 'general', r.tags || '', fmtValue(r.value), fmtTs(r.updated_at)])
+    );
+  }
+
+  // Channel Memories
+  const channelTables = await db.all(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'channel_memories_%' ORDER BY name`
+  );
+  for (const { name: tbl } of channelTables) {
+    const ch = tbl.replace(/^channel_memories_/, '');
+    const rows = await db.all(`SELECT key, category, tags, value, updated_at FROM ${tbl} ORDER BY category, key`);
+    print('');
+    print(`${c.cyan}${c.bold}Channel: ${ch}${c.reset}  ${c.gray}(${rows.length} rows)${c.reset}`);
+    if (rows.length === 0) {
+      print(`  ${c.gray}(empty)${c.reset}`);
+    } else {
+      renderTable(
+        ['Key', 'Category', 'Tags', 'Value', 'Updated'],
+        rows.map(r => [r.key, r.category || 'general', r.tags || '', fmtValue(r.value), fmtTs(r.updated_at)])
+      );
+    }
+  }
+
+  // Skills
+  const skillRows = await db.all(
+    'SELECT name, owner, description, instructions, training_progress, updated_at FROM skills ORDER BY name'
+  );
+  print('');
+  print(`${c.cyan}${c.bold}Skills${c.reset}  ${c.gray}(${skillRows.length} rows)${c.reset}`);
+  if (skillRows.length === 0) {
+    print(`  ${c.gray}(empty)${c.reset}`);
+  } else {
+    renderTable(
+      ['Name', 'Owner', 'Description', 'Instructions', 'Trains', 'Updated'],
+      skillRows.map(r => {
+        let trains = 0;
+        try { trains = JSON.parse(r.training_progress)?.count ?? 0; } catch {}
+        return [
+          r.name,
+          r.owner || 'global',
+          truncate(r.description || '', 40),
+          truncate(r.instructions || '', 40),
+          String(trains),
+          fmtTs(r.updated_at),
+        ];
+      })
+    );
+  }
+
+  print('');
+  await db.close();
 }
 
 // ---- Dispatch ----
