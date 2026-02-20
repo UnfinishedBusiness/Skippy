@@ -291,6 +291,7 @@ function cmdHelp() {
   print(`  ${c.bold}./skippy start --debug${c.reset}                              Run in the foreground with live output`);
   print(`  ${c.bold}./skippy stop${c.reset}                                       Stop the running daemon`);
   print(`  ${c.bold}./skippy restart${c.reset}                                    Stop and restart the daemon`);
+  print(`  ${c.bold}./skippy cron${c.reset} ${c.yellow}--dump${c.reset}                                      Display all cron jobs in a table`);
   print(`  ${c.bold}./skippy memory${c.reset} ${c.yellow}--dump${c.reset}                                   Display all memory data in colored tables`);
   print(`  ${c.bold}./skippy memory${c.reset} ${c.yellow}--table <name>${c.reset}                          Display specific table (global, skills, channel_<name>)`);
   print(`  ${c.bold}./skippy memory${c.reset} ${c.yellow}--key <name>${c.reset}                            Get specific key (use with --table)`);
@@ -605,6 +606,149 @@ async function cmdMemory(argv) {
   await db.close();
 }
 
+// Format milliseconds to human readable (e.g., "1h 30m", "45m", "30s")
+function fmtDuration(ms) {
+  if (!ms) return '-';
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) return `${days}d ${hours % 24}h`;
+  if (hours > 0) return `${hours}h ${minutes % 60}m`;
+  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+  return `${seconds}s`;
+}
+
+// Format timestamp to local AM/PM format
+function fmtTimestampLocal(ts) {
+  if (!ts) return '-';
+  try {
+    const date = new Date(ts);
+    return date.toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    });
+  } catch {
+    return ts;
+  }
+}
+
+// Format schedule days to human readable (e.g., "Mon, Wed, Fri")
+function fmtScheduleDays(days) {
+  if (!days) return '-';
+  const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  return days.map(d => dayNames[d]).join(', ');
+}
+
+// Format schedule time to AM/PM
+function fmtScheduleTime(schedule) {
+  if (!schedule) return '-';
+  const { hour, minute } = schedule;
+  const h = hour % 12 || 12;
+  const ampm = hour < 12 ? 'AM' : 'PM';
+  return `${h}:${minute.toString().padStart(2, '0')} ${ampm}`;
+}
+
+async function cmdCron(argv) {
+  const { flags } = parseFlags(argv);
+
+  if (!flags.dump) {
+    err('No valid cron operation specified');
+    print(`  Available:`);
+    print(`    ${c.bold}--dump${c.reset}            - display all cron jobs in a table`);
+    print(`  Examples:`);
+    print(`    ${c.gray}./skippy cron --dump${c.reset}`);
+    process.exit(1);
+  }
+
+  const { CRON_DB } = require('./core/paths');
+  const sqlite3 = require('sqlite3').verbose();
+  const { open } = require('sqlite');
+
+  if (!fs.existsSync(CRON_DB)) {
+    warn(`No cron database found at ${CRON_DB}`);
+    process.exit(1);
+  }
+
+  let db;
+  try {
+    db = await open({ filename: CRON_DB, driver: sqlite3.Database });
+  } catch (e) {
+    err(`Failed to open cron database: ${e.message}`);
+    process.exit(1);
+  }
+
+  function renderTable(headers, rows) {
+    const widths = headers.map((h, i) =>
+      Math.max(h.length, ...rows.map(r => String(r[i] ?? '').length))
+    );
+    const bar = c.gray + '+' + widths.map(w => '-'.repeat(w + 2)).join('+') + '+' + c.reset;
+    print(bar);
+    print(c.bold + '|' + headers.map((h, i) => ` ${h.padEnd(widths[i])} `).join('|') + '|' + c.reset);
+    print(bar);
+    for (const row of rows) {
+      print('|' + row.map((cell, i) => ` ${String(cell ?? '').padEnd(widths[i])} `).join('|') + '|');
+    }
+    print(bar);
+  }
+
+  // Get all cron jobs
+  const jobs = await db.all('SELECT * FROM cron_jobs ORDER BY created_at');
+
+  print('');
+  print(`${c.cyan}${c.bold}Cron Jobs${c.reset}  ${c.gray}(${jobs.length} jobs)${c.reset}`);
+
+  if (jobs.length === 0) {
+    print(`  ${c.gray}(empty)${c.reset}`);
+  } else {
+    // Build table rows with formatted data
+    const rows = jobs.map(job => {
+      const action = JSON.parse(job.action);
+      let scheduleStr = '-';
+      if (job.type === 'one_time') {
+        scheduleStr = fmtTimestampLocal(job.time);
+      } else if (job.type === 'interval') {
+        scheduleStr = `Every ${fmtDuration(job.interval_ms)}`;
+      } else if (job.type === 'schedule') {
+        const sched = JSON.parse(job.schedule);
+        scheduleStr = `${fmtScheduleDays(sched.days)} at ${fmtScheduleTime(sched)}`;
+      }
+
+      // Truncate action details
+      let actionStr = '-';
+      if (action.type === 'prompt') {
+        actionStr = action.prompt?.slice(0, 40) || '-';
+        if (action.prompt?.length > 40) actionStr += '…';
+      } else if (action.type === 'bash') {
+        actionStr = '$ ' + (action.command?.slice(0, 35) || '-');
+        if (action.command?.length > 35) actionStr += '…';
+      }
+
+      return [
+        job.id.slice(0, 8),
+        job.type,
+        job.disabled ? '❌' : '✅',
+        scheduleStr,
+        actionStr,
+        fmtTimestampLocal(job.last_fired),
+      ];
+    });
+
+    renderTable(
+      ['ID', 'Type', 'Status', 'Schedule', 'Action', 'Last Fired'],
+      rows
+    );
+  }
+
+  print('');
+  await db.close();
+}
+
 // ---- Dispatch ----
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -613,6 +757,7 @@ switch (cmd) {
   case 'start':   cmdStart(rest.includes('--debug')); break;
   case 'stop':    cmdStop(); break;
   case 'restart': cmdRestart(); break;
+  case 'cron':    cmdCron(rest); break;
   case 'memory':  cmdMemory(rest); break;
   case 'prompt':  cmdPrompt(rest); break;
   case 'discord': cmdDiscord(rest); break;
