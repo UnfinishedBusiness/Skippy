@@ -1142,16 +1142,47 @@ async function runPrompt({ prompt, model, stream = true, discordMessage, imageUr
     let parsedJson = extractFirstJson(jsonToParse);
     
     if (!parsedJson) {
+      // JSON parsing failed - check if the raw response contains tool calls
+      // If no tool calls are needed, just send the raw text to Discord
+      const hasToolCallPattern = buffer.includes('"tool"') || buffer.includes('"actions"');
+      
+      if (!hasToolCallPattern) {
+        // No tool calls detected - treat raw text as final answer
+        logger.warn('[runPrompt] JSON parse failed but no tool calls detected - sending raw response to Discord');
+        const rawText = buffer.trim();
+        
+        if (discordMessage) {
+          await trackStatus(discordMessage, 'complete', 'Response received (raw text mode)');
+        }
+        
+        if (callback) {
+          callback({
+            tool_results: [],
+            last_response: {
+              reasoning: 'Raw text response (JSON parse failed but no tools needed)',
+              actions: [],
+              final_answer: rawText,
+              continue: false
+            },
+            loop_count: loopCount,
+            status_messages: statusMessages,
+            success: true
+          }, true);
+        }
+        return;
+      }
+      
+      // Tool calls were expected but JSON parse failed - treat as error
       logger.error('❌ [runPrompt] Failed to parse Ollama response as JSON');
       logger.error(`[runPrompt] Raw buffer full content: "${buffer}"`);
       
       if (discordMessage) {
-        await trackStatus(discordMessage, 'error', 'Failed to parse AI response');
+        await trackStatus(discordMessage, 'error', 'Failed to parse AI response - tool call expected');
       }
       
       if (callback) {
         callback({
-          error: 'Invalid JSON response from AI',
+          error: 'Invalid JSON response from AI (tool call expected)',
           raw: buffer,
           debug_info: {
             buffer_length: buffer.length,
