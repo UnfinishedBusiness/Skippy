@@ -1,5 +1,18 @@
 # PatchFileTool Registry
 
+## ⚠️ CRITICAL MANDATORY REQUIREMENTS
+
+**NEVER call PatchFileTool without providing actual find/replace content.**
+
+- ❌ **INVALID**: Calling `PatchFileTool` with an empty or missing patch block
+- ✅ **VALID**: Calling `PatchFileTool` WITH a complete ===SKIPPY_PATCH_START=== block containing at least one ===FIND===/===REPLACE=== pair
+
+If you call `PatchFileTool` without including a valid patch block, the tool will apply **0 changes** and waste a conversation round trip.
+
+**You MUST provide patch content in EVERY PatchFileTool call. There are no exceptions.**
+
+---
+
 ## ⚠️ When to use PatchFileTool vs FileWriteTool
 
 **PatchFileTool** — targeted find/replace edits on specific sections of an existing file.
