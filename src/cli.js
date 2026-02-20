@@ -280,6 +280,8 @@ function cmdLog(follow) {
   }
 }
 
+
+
 function cmdHelp() {
   print('');
   print(`${c.cyan}${c.bold}Skippy${c.reset}`);
@@ -289,6 +291,7 @@ function cmdHelp() {
   print(`  ${c.bold}./skippy start --debug${c.reset}                              Run in the foreground with live output`);
   print(`  ${c.bold}./skippy stop${c.reset}                                       Stop the running daemon`);
   print(`  ${c.bold}./skippy restart${c.reset}                                    Stop and restart the daemon`);
+  print(`  ${c.bold}./skippy memory${c.reset} ${c.yellow}--dump${c.reset}                                   Display memory data in colored tables`);
   print(`  ${c.bold}./skippy prompt${c.reset} ${c.yellow}"message"${c.reset}                                   Send a prompt, print result to stdout`);
   print(`  ${c.bold}./skippy prompt${c.reset} ${c.yellow}--context <text> "message"${c.reset}                  Attach extra context to the prompt`);
   print(`  ${c.bold}cat file | ./skippy prompt${c.reset} ${c.yellow}"message"${c.reset}                         Pipe content as context`);
@@ -298,11 +301,37 @@ function cmdHelp() {
   print(`  ${c.bold}./skippy prompt${c.reset} ${c.yellow}--output discord --channel <c> "msg"${c.reset}        Send prompt result to a channel`);
   print(`  ${c.bold}./skippy discord${c.reset} ${c.yellow}"message"${c.reset}                         Send a message directly to Discord (DM default_user)`);
   print(`  ${c.bold}./skippy discord${c.reset} ${c.yellow}--user <u> "message"${c.reset}              DM a specific user directly`);
-  print(`  ${c.bold}./skippy discord${c.reset} ${c.yellow}--channel <c> "message"${c.reset}           Post directly to a channel`);
+  print(` ${c.bold}./skippy discord${c.reset} ${c.yellow}--channel <c> "message"${c.reset}           Post directly to a channel`);
   print(`  ${c.bold}./skippy log${c.reset}                                        Print the daemon log`);
   print(`  ${c.bold}./skippy log --follow${c.reset}                               Follow the log live (like tail -f)`);
+  print(`  ${c.bold}./skippy memory --dump${c.reset}                              Display memory data in colored tables`);
   print(`  ${c.bold}./skippy --help${c.reset}                                     Show this message`);
   print('');
+}
+
+async function cmdMemory(argv) {
+  const { sendIpcRequest } = require('./core/ipc');
+  const { flags, positional } = parseFlags(argv);
+
+  if (flags.dump) {
+    const request = { type: 'memory_dump' };
+
+    try {
+      const result = await sendIpcRequest(request);
+      if (result.content) {
+        process.stdout.write(result.content + '\n');
+      } else {
+        err('No memory data returned');
+      }
+    } catch (e) {
+      err(e.message);
+      process.exit(1);
+    }
+  } else {
+    err('No valid memory operation specified');
+    print(`  Available: ${c.bold}--dump${c.reset} - display memory data in colored tables`);
+    process.exit(1);
+  }
 }
 
 // ---- Dispatch ----
@@ -313,6 +342,7 @@ switch (cmd) {
   case 'start':   cmdStart(rest.includes('--debug')); break;
   case 'stop':    cmdStop(); break;
   case 'restart': cmdRestart(); break;
+  case 'memory':  cmdMemory(rest); break;
   case 'prompt':  cmdPrompt(rest); break;
   case 'discord': cmdDiscord(rest); break;
   case 'log':     cmdLog(rest.includes('--follow')); break;
@@ -321,6 +351,6 @@ switch (cmd) {
   case undefined: cmdHelp(); break;
   default:
     err(`Unknown command: ${cmd}`);
-    cmdHelp();
+ cmdHelp();
     process.exit(1);
 }
