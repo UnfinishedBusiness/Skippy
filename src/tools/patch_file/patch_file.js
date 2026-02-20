@@ -93,6 +93,34 @@ class PatchFileTool extends Tool {
     return null;
   }
 
+  /**
+   * When a patch fails, searches the file for the first non-blank normalized
+   * line of `findText` as an anchor, then returns a window of actual file lines
+   * around that anchor.
+   *
+   * The returned excerpt is included in the error message so the model can see
+   * the exact text it should be targeting and re-attempt with accurate content.
+   * Returns null if the anchor line itself can't be found anywhere in the file.
+   */
+  _findClosestContext(content, findText) {
+    const normLine = s => s.replace(/\t/g, '  ').replace(/[ \t]+/g, ' ').trim();
+    const contentLines = content.split('\n');
+    const normContent  = contentLines.map(normLine);
+
+    const findLines = findText.split('\n');
+    const anchor    = findLines.map(normLine).find(l => l !== '');
+    if (!anchor) return null;
+
+    const matchIdx = normContent.findIndex(l => l === anchor);
+    if (matchIdx === -1) return null;
+
+    // Return a window: 2 lines before the anchor + enough lines to cover the find text
+    const windowSize = Math.max(findLines.length + 4, 10);
+    const start = Math.max(0, matchIdx - 2);
+    const end   = Math.min(contentLines.length, start + windowSize);
+    return contentLines.slice(start, end).join('\n');
+  }
+
   async run(args) {
     const logger = global.logger || console;
 
@@ -173,9 +201,11 @@ class PatchFileTool extends Tool {
         continue;
       }
 
-      // 3. Both strategies failed — record it for the error report
+      // 3. Both strategies failed — record the find text and the actual file
+      //    context at that location so the model can self-correct on retry.
+      const ctx = this._findClosestContext(content, change.find);
       logger.warn(`PatchFileTool: Find block not found (exact or normalized) in ${filePath}:\n${change.find}`);
-      failed.push(change.find);
+      failed.push({ find: change.find, context: ctx });
     }
 
     if (applied > 0) {
@@ -185,11 +215,19 @@ class PatchFileTool extends Tool {
     logger.info(`PatchFileTool: Applied ${applied}/${changes.length} changes to ${filePath}`);
 
     if (failed.length > 0) {
-      const summary = failed.map((f, i) => `Change ${i + 1} find text not found:\n${f}`).join('\n\n');
+      const summary = failed.map((f, i) => {
+        let msg = `Change ${i + 1}: find text not found in file.\nYour ===FIND=== block was:\n${f.find}`;
+        if (f.context) {
+          msg += `\n\nActual file content at that location (copy this EXACTLY into your ===FIND=== block):\n${f.context}`;
+        } else {
+          msg += `\n\n(The first line of your find text could not be located in the file at all — read the file first.)`;
+        }
+        return msg;
+      }).join('\n\n---\n\n');
       return {
         filepath: filePath,
         result: `Applied ${applied}/${changes.length} changes — ${failed.length} find block(s) not found`,
-        error: `${failed.length} change(s) could not be applied because the find text was not found in the file (exact or whitespace-normalized). You must read the file first and copy the find text exactly as it appears.\n\n${summary}`,
+        error: `${failed.length} change(s) could not be applied. The ===FIND=== text did not match the file (tried exact and whitespace-normalized). Use the actual file content shown below for your next ===FIND=== block.\n\n${summary}`,
         exitCode: 1
       };
     }
