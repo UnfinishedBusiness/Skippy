@@ -867,6 +867,21 @@ function clearAbort(channelId) {
   abortedChannels.delete(channelId);
 }
 
+// Pending continuations — saved when a prompt hits the loop limit.
+// Keyed by channelId: { toolResults, resumePrompt, originalPrompt, loopCount }
+const pendingContinuations = new Map();
+
+function isAffirmativeResponse(text) {
+  const s = text.trim().toLowerCase().replace(/[!.,?]+$/, '');
+  const affirmatives = [
+    'yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay',
+    'continue', 'go ahead', 'proceed', 'go on', 'keep going',
+    'yes please', 'please continue', 'do it', 'go for it',
+    'absolutely', 'definitely', 'of course', 'certainly'
+  ];
+  return affirmatives.some(a => s === a || s.startsWith(a + ' '));
+}
+
 // Download a URL and return the raw bytes as a base64 string (no data-URL prefix).
 function downloadImageAsBase64(url) {
   const lib = url.startsWith('https') ? require('https') : require('http');
@@ -938,7 +953,22 @@ async function runPrompt({ prompt, model, stream = true, discordMessage, imageUr
   
   // Clear any stale abort for this channel at the start of a new prompt
   clearAbort(channelId);
-  
+
+  // Check whether the user is responding to a loop-limit continuation prompt.
+  // If yes and affirmative: restore the accumulated context and resume the work.
+  // If yes and not affirmative: discard the saved context and run fresh.
+  const pendingContinuation = pendingContinuations.get(channelId);
+  if (pendingContinuation) {
+    if (isAffirmativeResponse(prompt)) {
+      logger.info(`[runPrompt] Resuming continuation for channel ${channelId} (${pendingContinuation.toolResults.length} prior result(s))`);
+      toolResults = pendingContinuation.toolResults;
+      userPrompt  = pendingContinuation.resumePrompt;
+    } else {
+      logger.info(`[runPrompt] Discarding pending continuation for channel ${channelId} — starting fresh`);
+    }
+    pendingContinuations.delete(channelId);
+  }
+
   // Load loop limit from already-loaded global config
   let loopLimit = 10;
   if (global.SkippyConfig?.prompt?.loop_limit != null) {
@@ -1264,39 +1294,35 @@ async function runPrompt({ prompt, model, stream = true, discordMessage, imageUr
     
     // Check if we've reached the loop limit
     if (loopCount >= loopLimit && continueLoop) {
-      logger.info(`[runPrompt] Reached loop limit (${loopLimit}), stopping`);
-      
-      // Store continuation context for potential resume
-      const continuationContext = {
-        tool_results: toolResults,
-        last_response: lastResponse,
-        loop_count: loopCount,
-        user_prompt: userPrompt,
+      logger.info(`[runPrompt] Reached loop limit (${loopLimit}), saving continuation and asking user`);
+
+      // Build the prompt that would start the next iteration so all accumulated
+      // tool results are preserved exactly when the user says yes.
+      const resumePrompt = JSON.stringify({
         original_prompt: prompt,
-        timestamp: Date.now()
-      };
-      
-      // Store continuation context in memory
- const memTool = toolRegistry['MemoryTool'];
-      if (memTool) {
-        await memTool.setGlobal({
-          key: `continuation_context_${channelId}`,
-          value: continuationContext,
-          category: 'system',
-          tags: ['continuation', 'loop_limit']
-        });
-      }
-      
+        tool_results: toolResults,
+        last_response: lastResponse
+      });
+
+      pendingContinuations.set(channelId, {
+        toolResults,
+        resumePrompt,
+        originalPrompt: prompt,
+        loopCount
+      });
+
+      const continueQuestion = `I've hit my step limit (${loopLimit} steps) and there's still work to do. Would you like me to continue?`;
+
       if (discordMessage) {
-        await discordMessage.channel.send(`⚠️ I hit the step limit (${loopLimit} steps) before finishing. Send "continue" to resume where we left off, or a new message to start fresh.`);
+        await discordMessage.channel.send(continueQuestion);
       }
-      
+
       if (callback) {
         callback({
           max_iterations_reached: true,
-          continuation_context_key: `continuation_context_${channelId}`,
+          continuation_pending: true,
           tool_results: toolResults,
-          last_response: lastResponse,
+          last_response: { ...(lastResponse || {}), final_answer: continueQuestion },
           loop_count: loopCount,
           status_messages: statusMessages
         }, true);

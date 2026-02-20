@@ -6,21 +6,21 @@ class PatchFileTool extends Tool {
   // Build argument array from action object for dynamic tool invocation
   static buildArgsFromAction(action) {
     const args = action.arguments || {};
-    
+
     // Handle case where arguments is already an array
     if (Array.isArray(args)) return args;
-    
+
     // Handle case where arguments is an object with filepath and patch properties
     if (typeof args === 'object' && args !== null) {
       // Extract filepath and patch from the object
       const filepath = args.filepath || args.path || args.file || null;
       const changes = args.changes || args.patches || args.edits || null;
-      
+
       // Return as array if both values exist
       if (filepath !== null && changes !== null) {
         return [filepath, changes];
       }
-      
+
       // If we have a filepath but no patch, try to find patch content in other properties
       if (filepath !== null) {
         // Look for patch content in various possible properties
@@ -31,7 +31,7 @@ class PatchFileTool extends Tool {
           }
         }
       }
-      
+
       // If we have patch content but no filepath, look for filepath in other properties
       if (changes !== null) {
         const pathKeys = ['filepath', 'path', 'file', 'filename'];
@@ -41,18 +41,61 @@ class PatchFileTool extends Tool {
           }
         }
       }
-      
+
       // If we can't find both, return what we have
       return [filepath, changes].filter(arg => arg !== null);
     }
-    
+
     // For all other cases, wrap in array
     return [args];
   }
 
+  /**
+   * Attempts a whitespace-normalized line-by-line match as a fallback when
+   * exact string matching fails.
+   *
+   * Each line in both the find text and the file content is normalized
+   * (tabs → spaces, runs of spaces collapsed to one, leading/trailing trimmed)
+   * before comparison.  If a matching run of lines is found, the corresponding
+   * original lines in the file are replaced with the replacement text.
+   *
+   * This handles the common LLM failure mode of generating the right content
+   * with subtly wrong indentation.  It does NOT match across different line
+   * counts, so hallucinated line-merges are correctly rejected.
+   *
+   * Returns the new file content string on success, or null on failure.
+   */
+  _tryNormalizedPatch(content, findText, replaceText) {
+    const normLine = s => s.replace(/\t/g, '  ').replace(/[ \t]+/g, ' ').trim();
+
+    const findLines    = findText.split('\n');
+    const contentLines = content.split('\n');
+    const normFind    = findLines.map(normLine);
+    const normContent = contentLines.map(normLine);
+
+    const fLen = findLines.length;
+
+    for (let start = 0; start <= contentLines.length - fLen; start++) {
+      let match = true;
+      for (let i = 0; i < fLen; i++) {
+        if (normContent[start + i] !== normFind[i]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        const before = contentLines.slice(0, start).join('\n');
+        const after  = contentLines.slice(start + fLen).join('\n');
+        return (before ? before + '\n' : '') + replaceText + (after ? '\n' + after : '');
+      }
+    }
+
+    return null;
+  }
+
   async run(args) {
     const logger = global.logger || console;
-    
+
     // Enhanced argument validation
     if (!args || args.length < 2) {
       logger.error('PatchFileTool: Insufficient arguments provided');
@@ -105,6 +148,7 @@ class PatchFileTool extends Tool {
 
     let content = fs.readFileSync(filePath, 'utf8');
     let applied = 0;
+    const failed = [];
 
     for (const change of changes) {
       if (!change || typeof change !== 'object' || typeof change.find !== 'string' || typeof change.replace !== 'string') {
@@ -112,18 +156,44 @@ class PatchFileTool extends Tool {
         continue;
       }
 
+      // 1. Try exact match
       const idx = content.indexOf(change.find);
-      if (idx === -1) {
-        logger.warn('PatchFileTool: Find block not found, skipping:', change.find);
+      if (idx !== -1) {
+        content = content.replace(change.find, change.replace);
+        applied++;
         continue;
       }
 
-      content = content.replace(change.find, change.replace);
-      applied++;
+      // 2. Fallback: whitespace-normalized line match
+      const normalized = this._tryNormalizedPatch(content, change.find, change.replace);
+      if (normalized !== null) {
+        logger.info(`PatchFileTool: Applied change via whitespace-normalized match (exact match failed) in ${filePath}`);
+        content = normalized;
+        applied++;
+        continue;
+      }
+
+      // 3. Both strategies failed — record it for the error report
+      logger.warn(`PatchFileTool: Find block not found (exact or normalized) in ${filePath}:\n${change.find}`);
+      failed.push(change.find);
     }
 
-    fs.writeFileSync(filePath, content, 'utf8');
-    logger.info(`PatchFileTool: Applied ${applied} changes to ${filePath}`);
+    if (applied > 0) {
+      fs.writeFileSync(filePath, content, 'utf8');
+    }
+
+    logger.info(`PatchFileTool: Applied ${applied}/${changes.length} changes to ${filePath}`);
+
+    if (failed.length > 0) {
+      const summary = failed.map((f, i) => `Change ${i + 1} find text not found:\n${f}`).join('\n\n');
+      return {
+        filepath: filePath,
+        result: `Applied ${applied}/${changes.length} changes — ${failed.length} find block(s) not found`,
+        error: `${failed.length} change(s) could not be applied because the find text was not found in the file (exact or whitespace-normalized). You must read the file first and copy the find text exactly as it appears.\n\n${summary}`,
+        exitCode: 1
+      };
+    }
+
     return {
       filepath: filePath,
       result: `Applied ${applied} changes`,
