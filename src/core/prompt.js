@@ -292,11 +292,17 @@ function extractFirstJson(text) {
 
   logger.debug(`[extractFirstJson] After cleanup length: ${workingText.length}`);
 
-  // Step 2: Try direct JSON.parse first
+  // Step 4: Try direct JSON.parse first
   try {
     const parsed = JSON.parse(workingText);
     logger.info('[extractFirstJson] ✅ Direct JSON.parse succeeded');
-    return normalizeResponse(parsed);
+    
+    // Validate structure has required schema
+    if (!validateJsonStructure(workingText)) {
+      logger.warn('[extractFirstJson] Response lacks expected JSON structure, moving to step-by-step parsing');
+    } else {
+      return normalizeResponse(parsed);
+    }
   } catch (e) {
     logger.debug(`[extractFirstJson] Direct parse failed: ${e.message}`);
   }
@@ -344,7 +350,25 @@ function extractFirstJson(text) {
     }
   }
 
-  // Step 7: Log detailed diagnostic info
+  // Step 7: Escalating retry mechanism - try progressively stricter constraints
+  function tryStricterParsing(text, attempt) {
+    if (attempt === 1) return text; // Normal parsing
+    if (attempt === 2) return text.replace(/^[^{]*/, ''); // Strip leading non-JSON
+    if (attempt === 3) return text.split(/[{}]/).slice(0, 3).join(''); // Extract core JSON structure
+    return text; // Fallback
+  }
+
+  for (let retryAttempt = 2; retryAttempt <= 3; retryAttempt++) {
+    logger.debug(`[extractFirstJson] Retry attempt ${retryAttempt} with stricter parsing`);
+    const retryText = tryStricterParsing(workingText, retryAttempt);
+    const result = tryParseFromPositionRobust(retryText, 0);
+    if (result.success) {
+      logger.info(`[extractFirstJson] ✅ Retry attempt ${retryAttempt} succeeded`);
+      return normalizeResponse(result.data);
+    }
+  }
+
+  // Step 8: Log detailed diagnostic info
   logger.error('[extractFirstJson] ❌ All extraction methods failed');
   logger.error(`[extractFirstJson] Original text length: ${originalText.length}`);
   logger.error(`[extractFirstJson] Working text length: ${workingText.length}`);

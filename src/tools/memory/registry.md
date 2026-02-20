@@ -304,6 +304,76 @@ Always check `success` before using the result. Common error cases:
 
 ---
 
+## Automatic Memory Storage Guidelines
+
+These guidelines govern when and how to automatically store memories without explicit user permission. Automatic storage should be used for project-specific knowledge that improves efficiency and reduces redundant tool usage.
+
+### When to Automatically Store Memories
+
+**Automatic storage is appropriate for:**
+- **Repeated corrections** - When the same correction is made multiple times (e.g., file path corrections)
+- **Project-specific details** - Information specific to the current project context (e.g., project file paths, configuration values)
+- **Local conventions** - Patterns and preferences specific to the channel context
+
+**Require explicit permission for:**
+- Personal preferences that apply globally
+- Sensitive information (passwords, API keys)
+- Broad behavioral changes
+
+### Automatic Storage Patterns
+
+**Key Naming Conventions:**
+- `project_file_paths` - Store corrected file paths (e.g., `src/core/prompt.js` instead of `src/prompt.js`)
+- `project_config_values` - Store project-specific configuration defaults
+- `local_conventions` - Store channel-specific workflow patterns
+
+**Storage Scope:**
+- Always use **channel memory** for project-specific knowledge
+- Use `category: "project"` for automatic storage entries
+- Apply `tags: ["auto_stored", "project_knowledge"]` for easy filtering
+
+### Examples of Automatic Storage
+
+**File Path Correction:**
+
+{
+  "type": "tool_call",
+  "tool": "MemoryTool",
+  "arguments": {
+    "op": "setChannel",
+    "channelName": "skippy",
+    "key": "project_file_paths",
+    "value": {
+      "prompt.js": "src/core/prompt.js",
+      "registry.md": "src/tools/memory/registry.md"
+    },
+    "category": "project",
+    "tags": ["auto_stored", "file_paths"]
+  },
+  "reasoning": "Automatically storing corrected file paths after repeated corrections"
+}
+```
+
+**Project Configuration:**
+
+{
+  "type": "tool_call",
+  "tool": "MemoryTool",
+  "arguments": {
+    "op": "setChannel",
+    "channelName": "megafurnace",
+    "key": "project_config_values",
+    "value": {
+      "default_temperature": 1850,
+      "sensor_calibration_offset": 2.3
+    },
+    "category": "project",
+    "tags": ["auto_stored", "configuration"]
+  },
+ "reasoning": "Storing project-specific configuration values for consistent future use"
+}
+```
+
 ## Best Practices
 
 - **Never guess a key.** Keys are exact strings. Before calling `deleteGlobal`, `deleteChannel`, `getGlobal`, or `getChannel`, always run `search` or `listGlobal` first to get the real key from the result, then use that exact value. Guessing will fail with "Key not found".
