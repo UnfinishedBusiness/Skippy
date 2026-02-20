@@ -291,7 +291,9 @@ function cmdHelp() {
   print(`  ${c.bold}./skippy start --debug${c.reset}                              Run in the foreground with live output`);
   print(`  ${c.bold}./skippy stop${c.reset}                                       Stop the running daemon`);
   print(`  ${c.bold}./skippy restart${c.reset}                                    Stop and restart the daemon`);
-  print(`  ${c.bold}./skippy memory${c.reset} ${c.yellow}--dump${c.reset}                                   Display memory data in colored tables`);
+  print(`  ${c.bold}./skippy memory${c.reset} ${c.yellow}--dump${c.reset}                                   Display all memory data in colored tables`);
+  print(`  ${c.bold}./skippy memory${c.reset} ${c.yellow}--table <name>${c.reset}                          Display specific table (global, skills, channel_<name>)`);
+  print(`  ${c.bold}./skippy memory${c.reset} ${c.yellow}--key <name>${c.reset}                            Get specific key (use with --table)`);
   print(`  ${c.bold}./skippy prompt${c.reset} ${c.yellow}"message"${c.reset}                                   Send a prompt, print result to stdout`);
   print(`  ${c.bold}./skippy prompt${c.reset} ${c.yellow}--context <text> "message"${c.reset}                  Attach extra context to the prompt`);
   print(`  ${c.bold}cat file | ./skippy prompt${c.reset} ${c.yellow}"message"${c.reset}                         Pipe content as context`);
@@ -312,9 +314,18 @@ function cmdHelp() {
 async function cmdMemory(argv) {
   const { flags } = parseFlags(argv);
 
-  if (!flags.dump) {
+  if (!flags.dump && !flags.table && !flags.key) {
     err('No valid memory operation specified');
-    print(`  Available: ${c.bold}--dump${c.reset} - display memory data in colored tables`);
+    print(`  Available:`);
+    print(`    ${c.bold}--dump${c.reset}             - display all memory data in colored tables`);
+    print(`    ${c.bold}--table <name>${c.reset}    - display specific table (global, skills, or channel_<name>)`);
+    print(`    ${c.bold}--key <name>${c.reset}      - get a specific key (use with --table)`);
+    print(`  Examples:`);
+    print(`    ${c.gray}./skippy memory --dump${c.reset}`);
+    print(`    ${c.gray}./skippy memory --table global${c.reset}`);
+    print(`    ${c.gray}./skippy memory --table skills${c.reset}`);
+    print(`    ${c.gray}./skippy memory --table channel_skippy${c.reset}`);
+    print(`    ${c.gray}./skippy memory --table global --key user_name${c.reset}`);
     process.exit(1);
   }
 
@@ -366,6 +377,171 @@ async function cmdMemory(argv) {
       return truncate(raw, 60);
     }
   }
+
+  // Helper to format value for single key lookup (full value, not truncated)
+  function fmtValueFull(raw) {
+    try {
+      const p = JSON.parse(raw);
+      return typeof p === 'string' ? p : JSON.stringify(p, null, 2);
+    } catch {
+      return raw;
+    }
+  }
+
+  const tableName = flags.table;
+  const keyName = flags.key;
+  const fullBar = c.gray + '+' + '-'.repeat(76) + '+' + c.reset;
+
+  // Handle --key without --table (default to global)
+  const effectiveTable = tableName || (keyName ? 'global' : null);
+
+  // If --table or --key specified, only show that specific data
+  if (effectiveTable) {
+    if (effectiveTable === 'global') {
+      if (keyName) {
+        // Get specific key from global_memories
+        const row = await db.get('SELECT key, category, tags, value, updated_at FROM global_memories WHERE key = ?', keyName);
+        if (!row) {
+          warn(`Key '${keyName}' not found in global_memories`);
+          await db.close();
+          process.exit(1);
+        }
+        print('');
+        print(`${c.cyan}${c.bold}Global Memory: ${keyName}${c.reset}`);
+        print(fullBar);
+        print(`  ${c.bold}Key:${c.reset}     ${row.key}`);
+        print(`  ${c.bold}Category:${c.reset} ${row.category || 'general'}`);
+        print(`  ${c.bold}Tags:${c.reset}    ${row.tags || '(none)'}`);
+        print(`  ${c.bold}Updated:${c.reset}  ${fmtTs(row.updated_at)}`);
+        print(`  ${c.bold}Value:${c.reset}`);
+        print(fmtValueFull(row.value));
+        print(fullBar);
+      } else {
+        // Show all global memories
+        const globalRows = await db.all('SELECT key, category, tags, value, updated_at FROM global_memories ORDER BY category, key');
+        print('');
+        print(`${c.cyan}${c.bold}Global Memories${c.reset}  ${c.gray}(${globalRows.length} rows)${c.reset}`);
+        if (globalRows.length === 0) {
+          print(`  ${c.gray}(empty)${c.reset}`);
+        } else {
+          renderTable(
+            ['Key', 'Category', 'Tags', 'Value', 'Updated'],
+            globalRows.map(r => [r.key, r.category || 'general', r.tags || '', fmtValue(r.value), fmtTs(r.updated_at)])
+          );
+        }
+      }
+    } else if (effectiveTable === 'skills') {
+      if (keyName) {
+        // Get specific skill
+        const row = await db.get('SELECT name, owner, description, instructions, training_progress, updated_at FROM skills WHERE name = ?', keyName);
+        if (!row) {
+          warn(`Skill '${keyName}' not found`);
+          await db.close();
+          process.exit(1);
+        }
+        let trains = 0;
+        try { trains = JSON.parse(row.training_progress)?.count ?? 0; } catch {}
+        print('');
+        print(`${c.cyan}${c.bold}Skill: ${keyName}${c.reset}`);
+        print(fullBar);
+        print(`  ${c.bold}Name:${c.reset}        ${row.name}`);
+        print(`  ${c.bold}Owner:${c.reset}       ${row.owner || 'global'}`);
+        print(`  ${c.bold}Description:${c.reset} ${row.description || '(none)'}`);
+        print(`  ${c.bold}Training:${c.reset}    ${trains} count(s)`);
+        print(`  ${c.bold}Updated:${c.reset}     ${fmtTs(row.updated_at)}`);
+        print(`  ${c.bold}Instructions:${c.reset}`);
+        print(row.instructions || '(none)');
+        print(fullBar);
+      } else {
+        // Show all skills
+        const skillRows = await db.all(
+          'SELECT name, owner, description, instructions, training_progress, updated_at FROM skills ORDER BY name'
+        );
+        print('');
+        print(`${c.cyan}${c.bold}Skills${c.reset}  ${c.gray}(${skillRows.length} rows)${c.reset}`);
+        if (skillRows.length === 0) {
+          print(`  ${c.gray}(empty)${c.reset}`);
+        } else {
+          renderTable(
+            ['Name', 'Owner', 'Description', 'Instructions', 'Trains', 'Updated'],
+            skillRows.map(r => {
+              let trains = 0;
+              try { trains = JSON.parse(r.training_progress)?.count ?? 0; } catch {}
+              return [
+                r.name,
+                r.owner || 'global',
+                truncate(r.description || '', 40),
+                truncate(r.instructions || '', 40),
+                String(trains),
+                fmtTs(r.updated_at),
+              ];
+            })
+          );
+        }
+      }
+    } else if (effectiveTable.startsWith('channel_')) {
+      // Channel memory table
+      const channelName = effectiveTable.replace(/^channel_/, '');
+      const tbl = `channel_memories_${channelName}`;
+
+      // Check if table exists
+      const tableExists = await db.get(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name = ?`,
+        tbl
+      );
+
+      if (!tableExists) {
+        warn(`Channel memory table '${channelName}' not found`);
+        await db.close();
+        process.exit(1);
+      }
+
+      if (keyName) {
+        // Get specific key from channel memory
+        const row = await db.get('SELECT key, category, tags, value, updated_at FROM ' + tbl + ' WHERE key = ?', keyName);
+        if (!row) {
+          warn(`Key '${keyName}' not found in channel '${channelName}'`);
+          await db.close();
+          process.exit(1);
+        }
+        print('');
+        print(`${c.cyan}${c.bold}Channel Memory: ${channelName}/${keyName}${c.reset}`);
+        print(fullBar);
+        print(`  ${c.bold}Key:${c.reset}     ${row.key}`);
+        print(`  ${c.bold}Category:${c.reset} ${row.category || 'general'}`);
+        print(`  ${c.bold}Tags:${c.reset}    ${row.tags || '(none)'}`);
+        print(`  ${c.bold}Updated:${c.reset}  ${fmtTs(row.updated_at)}`);
+        print(`  ${c.bold}Value:${c.reset}`);
+        print(fmtValueFull(row.value));
+        print(fullBar);
+      } else {
+        // Show all channel memories for this channel
+        const rows = await db.all('SELECT key, category, tags, value, updated_at FROM ' + tbl + ' ORDER BY category, key');
+        print('');
+        print(`${c.cyan}${c.bold}Channel: ${channelName}${c.reset}  ${c.gray}(${rows.length} rows)${c.reset}`);
+        if (rows.length === 0) {
+          print(`  ${c.gray}(empty)${c.reset}`);
+        } else {
+          renderTable(
+            ['Key', 'Category', 'Tags', 'Value', 'Updated'],
+            rows.map(r => [r.key, r.category || 'general', r.tags || '', fmtValue(r.value), fmtTs(r.updated_at)])
+          );
+        }
+      }
+    } else {
+      err(`Unknown table: ${effectiveTable}`);
+      print(`  Valid tables: global, skills, channel_<name>`);
+      await db.close();
+      process.exit(1);
+    }
+
+    print('');
+    await db.close();
+    return;
+  }
+
+  // Full dump (original behavior)
+  // fullBar already defined above for effectiveTable block
 
   // Global Memories
   const globalRows = await db.all('SELECT key, category, tags, value, updated_at FROM global_memories ORDER BY category, key');
