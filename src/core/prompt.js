@@ -10,9 +10,9 @@ const { buildFileContextString, getContextImagePaths } = require('./context-mana
 // Import the enhanced Discord functions
 const { sendStatusUpdate, sendDiscordReasoning } = require('./discord');
 
-const SYSTEM_PROMPT = `RESPOND WITH PURE JSON ONLY. NO TEXT BEFORE OR AFTER JSON.
+const SYSTEM_PROMPT = `RESPOND WITH JSON. For FileWriteTool and PatchFileTool, file content follows the JSON in special blocks — see FILE CONTENT PROTOCOL below.
 
-STRICT RULE: Your entire response must be a single valid JSON object. No explanations, no conversational text, no backticks, no markdown.
+STRICT RULE: Your response must start with a single valid JSON object. For FileWriteTool and PatchFileTool ONLY, content blocks follow AFTER the JSON closing brace.
 
 Format: {"reasoning":"","actions":[],"final_answer":"","continue":false}
 
@@ -20,10 +20,36 @@ Format: {"reasoning":"","actions":[],"final_answer":"","continue":false}
 When calling tools, use EXACTLY this format:
 {
   "type": "tool_call",
-  "tool": "ToolName", 
-  "arguments": [...],
+  "tool": "ToolName",
+  "arguments": {...},
   "reasoning": "Why you need this"
 }
+
+## FILE CONTENT PROTOCOL (MANDATORY — read carefully)
+
+**NEVER put file content or patch text inside the JSON.** JSON encoding of multi-line code causes errors.
+Instead, omit "content" / "changes" from the JSON arguments and place the content in blocks AFTER the JSON.
+
+### Writing a whole file (FileWriteTool):
+Only put the filepath in arguments. Put the actual content after the JSON:
+
+{"reasoning":"...","actions":[{"type":"tool_call","tool":"FileWriteTool","arguments":{"filepath":"/path/to/file.js"},"reasoning":"..."}],"final_answer":"","continue":true}
+===SKIPPY_FILE_START:/path/to/file.js===
+your file content here — verbatim, no escaping needed
+===SKIPPY_FILE_END===
+
+### Patching a file (PatchFileTool):
+Only put the filepath in arguments. Put the find/replace pairs after the JSON:
+
+{"reasoning":"...","actions":[{"type":"tool_call","tool":"PatchFileTool","arguments":{"filepath":"/path/to/file.js"},"reasoning":"..."}],"final_answer":"","continue":true}
+===SKIPPY_PATCH_START:/path/to/file.js===
+===FIND===
+exact text to find (copy it exactly as it appears in the file)
+===REPLACE===
+replacement text
+===SKIPPY_PATCH_END===
+
+For multiple patches on one file, add more ===FIND===/===REPLACE=== pairs inside the same ===SKIPPY_PATCH_START/END=== block.
 
 ## TOOL USAGE RULES:
 
@@ -46,7 +72,7 @@ When calling tools, use EXACTLY this format:
 
 ## RESPONSE FLOW:
 
-1. **NEED TOOLS?** 
+1. **NEED TOOLS?**
    - actions=[tool_calls], continue=true, final_answer=""
 
 2. **HAVE RESULTS OR CAN ANSWER**
@@ -56,9 +82,10 @@ When calling tools, use EXACTLY this format:
    - actions=[], continue=false, final_answer="completion message"
 
 ## VALIDATION (MANDATORY):
-□ Response is pure JSON with no extra text
+□ Response starts with valid JSON
+□ FileWriteTool/PatchFileTool: NO content/changes in JSON arguments — use file blocks after the JSON
 □ If tools needed: continue=true, final_answer=""
-□ If done: continue=false with final_answer message  
+□ If done: continue=false with final_answer message
 □ Tool calls have "type": "tool_call" wrapper
 □ No questions or clarification requests
 
@@ -297,12 +324,10 @@ function extractFirstJson(text) {
     const parsed = JSON.parse(workingText);
     logger.info('[extractFirstJson] ✅ Direct JSON.parse succeeded');
     
-    // Validate structure has required schema
-    if (!validateJsonStructure(workingText)) {
-      logger.warn('[extractFirstJson] Response lacks expected JSON structure, moving to step-by-step parsing');
-    } else {
-      return normalizeResponse(parsed);
-    }
+    // JSON structure validation - this was referencing a non-existent function
+    // The parsing itself validated the JSON structure, so we can proceed
+    logger.debug('[extractFirstJson] Direct JSON.parse succeeded, structure validated by parsing');
+    return normalizeResponse(parsed);
   } catch (e) {
     logger.debug(`[extractFirstJson] Direct parse failed: ${e.message}`);
   }
@@ -651,6 +676,109 @@ function tryManualJsonExtraction(text) {
 }
 
 
+/**
+ * Extracts out-of-band file and patch content blocks from the raw LLM response.
+ *
+ * The LLM emits a JSON control object first, then optionally appends file blocks
+ * so that file content never has to be JSON-encoded (which is the root cause of
+ * the encoding errors we kept hitting).
+ *
+ * Supported block formats:
+ *
+ *   File write:
+ *     ===SKIPPY_FILE_START:/path/to/file===
+ *     ...content verbatim...
+ *     ===SKIPPY_FILE_END===
+ *
+ *   Patch (one or more find/replace pairs per file):
+ *     ===SKIPPY_PATCH_START:/path/to/file===
+ *     ===FIND===
+ *     ...exact text to find...
+ *     ===REPLACE===
+ *     ...replacement text...
+ *     ===SKIPPY_PATCH_END===
+ *
+ * Returns { jsonText, fileBlocks, patchBlocks } where:
+ *   jsonText    — the portion of the response before the first block delimiter
+ *   fileBlocks  — array of { filepath, content }
+ *   patchBlocks — array of { filepath, changes: [{ find, replace }] }
+ */
+function extractFileBlocks(rawBuffer) {
+  const logger = global.logger || console;
+  const fileBlocks = [];
+  const patchBlocks = [];
+
+  // Split the buffer at the first SKIPPY block delimiter so the JSON portion
+  // is cleanly separated from the out-of-band content sections.
+  const firstDelimIdx = rawBuffer.search(/===SKIPPY_(FILE|PATCH)_START:/);
+  const jsonText = firstDelimIdx !== -1 ? rawBuffer.slice(0, firstDelimIdx) : rawBuffer;
+
+  if (firstDelimIdx === -1) {
+    return { jsonText, fileBlocks, patchBlocks };
+  }
+
+  const blockText = rawBuffer.slice(firstDelimIdx);
+
+  // --- File write blocks ---
+  const fileStartRe = /===SKIPPY_FILE_START:([^\n=]+?)===/g;
+  let m;
+  while ((m = fileStartRe.exec(blockText)) !== null) {
+    const filepath = m[1].trim();
+    const afterHeader = m.index + m[0].length;
+    // Skip one leading newline that follows the header line
+    const contentStart = blockText[afterHeader] === '\n' ? afterHeader + 1 : afterHeader;
+    const endMarker = '===SKIPPY_FILE_END===';
+    const endIdx = blockText.indexOf(endMarker, contentStart);
+    if (endIdx === -1) {
+      logger.warn(`[extractFileBlocks] No FILE_END found for ${filepath}`);
+      continue;
+    }
+    // Strip the trailing newline that precedes the end marker
+    let content = blockText.slice(contentStart, endIdx);
+    if (content.endsWith('\n')) content = content.slice(0, -1);
+    fileBlocks.push({ filepath, content });
+    logger.debug(`[extractFileBlocks] Extracted file block: ${filepath} (${content.length} chars)`);
+  }
+
+  // --- Patch blocks ---
+  const patchStartRe = /===SKIPPY_PATCH_START:([^\n=]+?)===/g;
+  while ((m = patchStartRe.exec(blockText)) !== null) {
+    const filepath = m[1].trim();
+    const blockStart = m.index + m[0].length;
+    const endMarker = '===SKIPPY_PATCH_END===';
+    const blockEnd = blockText.indexOf(endMarker, blockStart);
+    if (blockEnd === -1) {
+      logger.warn(`[extractFileBlocks] No PATCH_END found for ${filepath}`);
+      continue;
+    }
+    const blockContent = blockText.slice(blockStart, blockEnd);
+
+    // Parse FIND/REPLACE pairs within the patch block
+    const changes = [];
+    const findMarker = '===FIND===';
+    const replaceMarker = '===REPLACE===';
+    const parts = blockContent.split(findMarker);
+    for (let i = 1; i < parts.length; i++) {
+      const part = parts[i];
+      const replaceIdx = part.indexOf(replaceMarker);
+      if (replaceIdx === -1) continue;
+      let find = part.slice(0, replaceIdx);
+      let replace = part.slice(replaceIdx + replaceMarker.length);
+      // Strip exactly one leading and one trailing newline that the format adds
+      if (find.startsWith('\n')) find = find.slice(1);
+      if (find.endsWith('\n')) find = find.slice(0, -1);
+      if (replace.startsWith('\n')) replace = replace.slice(1);
+      if (replace.endsWith('\n')) replace = replace.slice(0, -1);
+      changes.push({ find, replace });
+    }
+
+    patchBlocks.push({ filepath, changes });
+    logger.debug(`[extractFileBlocks] Extracted patch block: ${filepath} (${changes.length} change(s))`);
+  }
+
+  return { jsonText, fileBlocks, patchBlocks };
+}
+
 async function emptyPromptResponseMessage(context, options = {}) {
   const logger = global.logger || console;
   if (!context || typeof context !== 'string') {
@@ -941,7 +1069,16 @@ async function runPrompt({ prompt, model, stream = true, discordMessage, imageUr
     logger.debug(`[runPrompt] Clean buffer length: ${cleanBuffer.length}`);
     logger.debug(`[runPrompt] Clean buffer preview: "${cleanBuffer.substring(0, 300)}${cleanBuffer.length > 300 ? '...' : ''}"`);
 
-    let parsedJson = extractFirstJson(cleanBuffer);
+    // Extract out-of-band file/patch blocks BEFORE JSON parsing so that file
+    // content never has to travel through a JSON-encoded string.
+    const { jsonText, fileBlocks, patchBlocks } = extractFileBlocks(cleanBuffer);
+    const hasOutOfBandBlocks = fileBlocks.length > 0 || patchBlocks.length > 0;
+    if (hasOutOfBandBlocks) {
+      logger.info(`[runPrompt] Out-of-band blocks: ${fileBlocks.length} file write(s), ${patchBlocks.length} patch(es)`);
+    }
+    const jsonToParse = hasOutOfBandBlocks ? jsonText.trim() : cleanBuffer;
+
+    let parsedJson = extractFirstJson(jsonToParse);
     
     if (!parsedJson) {
       logger.error('❌ [runPrompt] Failed to parse Ollama response as JSON');
@@ -1054,6 +1191,28 @@ async function runPrompt({ prompt, model, stream = true, discordMessage, imageUr
             }
           }
 
+          // Inject out-of-band content from SKIPPY blocks into action arguments
+          // so the tool receives file content without it ever being JSON-encoded.
+          if (action.tool === 'FileWriteTool' && fileBlocks.length > 0) {
+            const fp = action.arguments?.filepath || action.arguments?.path || action.arguments?.file || '';
+            const block = fileBlocks.find(b => b.filepath === fp) || fileBlocks[0];
+            if (block) {
+              if (!action.arguments) action.arguments = {};
+              action.arguments.content = block.content;
+              logger.info(`[runPrompt] Injected out-of-band file content into FileWriteTool for ${block.filepath} (${block.content.length} chars)`);
+            }
+          }
+
+          if (action.tool === 'PatchFileTool' && patchBlocks.length > 0) {
+            const fp = action.arguments?.filepath || action.arguments?.path || action.arguments?.file || '';
+            const block = patchBlocks.find(b => b.filepath === fp) || patchBlocks[0];
+            if (block) {
+              if (!action.arguments) action.arguments = {};
+              action.arguments.changes = block.changes;
+              logger.info(`[runPrompt] Injected out-of-band patch changes into PatchFileTool for ${block.filepath} (${block.changes.length} change(s))`);
+            }
+          }
+
           // Use buildArgsFromAction if available for robust argument mapping
           let toolInstructions = action.arguments;
           const toolInstance = toolRegistry[action.tool];
@@ -1106,12 +1265,36 @@ async function runPrompt({ prompt, model, stream = true, discordMessage, imageUr
     // Check if we've reached the loop limit
     if (loopCount >= loopLimit && continueLoop) {
       logger.info(`[runPrompt] Reached loop limit (${loopLimit}), stopping`);
-      if (discordMessage) {
-        await discordMessage.channel.send(`⚠️ I hit the step limit (${loopLimit} steps) before finishing. Send a new message to continue where we left off.`);
+      
+      // Store continuation context for potential resume
+      const continuationContext = {
+        tool_results: toolResults,
+        last_response: lastResponse,
+        loop_count: loopCount,
+        user_prompt: userPrompt,
+        original_prompt: prompt,
+        timestamp: Date.now()
+      };
+      
+      // Store continuation context in memory
+ const memTool = toolRegistry['MemoryTool'];
+      if (memTool) {
+        await memTool.setGlobal({
+          key: `continuation_context_${channelId}`,
+          value: continuationContext,
+          category: 'system',
+          tags: ['continuation', 'loop_limit']
+        });
       }
+      
+      if (discordMessage) {
+        await discordMessage.channel.send(`⚠️ I hit the step limit (${loopLimit} steps) before finishing. Send "continue" to resume where we left off, or a new message to start fresh.`);
+      }
+      
       if (callback) {
         callback({
           max_iterations_reached: true,
+          continuation_context_key: `continuation_context_${channelId}`,
           tool_results: toolResults,
           last_response: lastResponse,
           loop_count: loopCount,
